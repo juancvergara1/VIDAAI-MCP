@@ -3,12 +3,9 @@
 /**
  * WhatsApp MCP Setup CLI
  *
- * Interactive setup that:
- * 1. Validates API key against relay
- * 2. Generates X25519 keypair (private key stays local)
- * 3. Registers public key with relay (activates webhooks)
- * 4. Runs Drizzle migrations on user's Neon DB
- * 5. Prints .mcp.json config for Claude Code/Desktop
+ * Interactive setup supporting two providers:
+ * - Cloud API: WhatsApp Business, E2E encrypted relay ($25/mo)
+ * - Baileys: Personal WhatsApp, QR code scan ($25/mo)
  *
  * Usage: npx @vidaai/whatsapp-mcp setup
  */
@@ -17,10 +14,6 @@ import { createInterface } from "readline";
 import { resolve, dirname } from "path";
 import { homedir } from "os";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
-import { generateKeyPair, loadPrivateKey } from "../crypto.js";
-import { RelayClient } from "../relay-client.js";
-import { createDb } from "../db/index.js";
-import { contacts, conversations, messages, actionItems, syncState } from "../db/schema.js";
 import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import { sql } from "drizzle-orm";
@@ -37,17 +30,122 @@ function ask(question: string): Promise<string> {
 }
 
 function log(msg: string) {
-  // Use stderr for all output (stdout reserved for JSON-RPC in MCP mode)
   process.stderr.write(msg + "\n");
 }
 
-async function main() {
-  log("");
-  log("  WhatsApp MCP Setup");
-  log("  ==================");
-  log("");
+// ── Shared: DB setup ──
 
-  // Step 1: API Key
+async function setupDatabase(neonUrl: string) {
+  // Test connection
+  log("  Testing database connection...");
+  const testSql = neon(neonUrl);
+  const testDb = drizzle(testSql);
+  await testDb.execute(sql`SELECT 1`);
+  log("  Database connected OK");
+
+  // Create tables
+  log("  Creating tables...");
+  const migSql = neon(neonUrl);
+  const migDb = drizzle(migSql);
+
+  await migDb.execute(sql`
+    CREATE TABLE IF NOT EXISTS mcp_contacts (
+      id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
+      phone TEXT NOT NULL UNIQUE,
+      name TEXT,
+      profile_name TEXT,
+      last_message_at TIMESTAMP,
+      created_at TIMESTAMP NOT NULL DEFAULT now()
+    )
+  `);
+
+  await migDb.execute(sql`
+    CREATE TABLE IF NOT EXISTS mcp_conversations (
+      id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
+      contact_id VARCHAR NOT NULL REFERENCES mcp_contacts(id) ON DELETE CASCADE,
+      last_message TEXT,
+      last_message_at TIMESTAMP,
+      unread_count INTEGER DEFAULT 0,
+      is_group TEXT DEFAULT 'false',
+      created_at TIMESTAMP NOT NULL DEFAULT now()
+    )
+  `);
+
+  // Add is_group column if table already exists (upgrade path)
+  await migDb.execute(sql`
+    ALTER TABLE mcp_conversations ADD COLUMN IF NOT EXISTS is_group TEXT DEFAULT 'false'
+  `).catch(() => {}); // Ignore if column already exists or DB doesn't support IF NOT EXISTS
+
+  await migDb.execute(sql`
+    CREATE TABLE IF NOT EXISTS mcp_messages (
+      id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
+      conversation_id VARCHAR NOT NULL REFERENCES mcp_conversations(id) ON DELETE CASCADE,
+      direction TEXT NOT NULL,
+      content TEXT,
+      media_type TEXT,
+      media_data TEXT,
+      media_filename TEXT,
+      audio_transcription TEXT,
+      wa_message_id TEXT UNIQUE,
+      timestamp TIMESTAMP NOT NULL,
+      is_read TEXT DEFAULT 'false',
+      created_at TIMESTAMP NOT NULL DEFAULT now()
+    )
+  `);
+
+  await migDb.execute(sql`
+    CREATE TABLE IF NOT EXISTS mcp_action_items (
+      id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
+      message_id VARCHAR REFERENCES mcp_messages(id) ON DELETE SET NULL,
+      title TEXT NOT NULL,
+      description TEXT,
+      status TEXT DEFAULT 'pending',
+      due_date TIMESTAMP,
+      external_id TEXT,
+      created_at TIMESTAMP NOT NULL DEFAULT now()
+    )
+  `);
+
+  await migDb.execute(sql`
+    CREATE TABLE IF NOT EXISTS mcp_sync_state (
+      id TEXT PRIMARY KEY DEFAULT 'default',
+      last_sync_at TIMESTAMP,
+      last_ack_id TEXT
+    )
+  `);
+
+  log("  Tables created OK");
+}
+
+// ── Shared: Write config to Claude Code ──
+
+function writeConfigToClaude(whatsappServer: any): boolean {
+  const mcpJsonPath = resolve(homedir(), ".claude", ".mcp.json");
+
+  try {
+    let mcpConfig: any = { mcpServers: {} };
+    if (existsSync(mcpJsonPath)) {
+      const existing = readFileSync(mcpJsonPath, "utf-8");
+      mcpConfig = JSON.parse(existing);
+      if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+    } else {
+      mkdirSync(dirname(mcpJsonPath), { recursive: true });
+    }
+
+    mcpConfig.mcpServers.whatsapp = whatsappServer;
+    writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf-8");
+    log(`  Config written to ${mcpJsonPath}`);
+    return true;
+  } catch (err: any) {
+    log(`  Could not auto-write config: ${err.message}`);
+    return false;
+  }
+}
+
+// ── Cloud API Setup ──
+
+async function setupCloudApi() {
+  // API Key
   let apiKey = process.env.VIDA_API_KEY || "";
   if (!apiKey) {
     apiKey = await ask("  API key (from vidaai.co/mcp): ");
@@ -57,7 +155,8 @@ async function main() {
     process.exit(1);
   }
 
-  // Validate API key against relay
+  // Validate against relay
+  const { RelayClient } = await import("../relay-client.js");
   const relay = new RelayClient(apiKey);
   log("  Validating API key...");
   try {
@@ -65,11 +164,7 @@ async function main() {
     if (status.connected) {
       log(`  WhatsApp connected: ${status.displayPhone || "yes"}`);
       if (status.isCoexistence) {
-        log("");
-        log("  Note: Your number is in coexistence mode.");
-        log("  Messages you send from your phone won't appear here.");
-        log("  For full coverage, migrate your number to the API.");
-        log("");
+        log("  Note: Coexistence mode — messages from your phone won't appear here.");
       }
     } else {
       log("  WhatsApp not yet connected. Connect at vidaai.co/mcp first.");
@@ -77,110 +172,15 @@ async function main() {
     }
   } catch (err: any) {
     log(`  Error: ${err.message}`);
-    log("  Check your API key and try again.");
     process.exit(1);
   }
 
-  // Step 2: Neon Database URL
-  let neonUrl = process.env.NEON_DATABASE_URL || "";
-  if (!neonUrl) {
-    log("");
-    log("  Where do you want to store your messages?");
-    log("  You need a PostgreSQL database (Neon recommended — free at neon.tech)");
-    log("");
-    neonUrl = await ask("  Neon DATABASE_URL: ");
-  }
-  if (!neonUrl.includes("postgresql") && !neonUrl.includes("postgres")) {
-    log("  Error: Invalid database URL. Should start with postgresql://");
-    process.exit(1);
-  }
+  // Neon DB
+  let neonUrl = await askForNeonUrl();
+  await setupDatabase(neonUrl);
 
-  // Test DB connection
-  log("  Testing database connection...");
-  try {
-    const testSql = neon(neonUrl);
-    const testDb = drizzle(testSql);
-    await testDb.execute(sql`SELECT 1`);
-    log("  Database connected OK");
-  } catch (err: any) {
-    log(`  Error: Cannot connect to database — ${err.message}`);
-    process.exit(1);
-  }
-
-  // Step 3: Run migrations (create tables)
-  log("  Creating tables...");
-  try {
-    const migSql = neon(neonUrl);
-    const migDb = drizzle(migSql);
-
-    // Create tables directly (simpler than running migration files)
-    await migDb.execute(sql`
-      CREATE TABLE IF NOT EXISTS mcp_contacts (
-        id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
-        phone TEXT NOT NULL UNIQUE,
-        name TEXT,
-        profile_name TEXT,
-        last_message_at TIMESTAMP,
-        created_at TIMESTAMP NOT NULL DEFAULT now()
-      )
-    `);
-
-    await migDb.execute(sql`
-      CREATE TABLE IF NOT EXISTS mcp_conversations (
-        id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
-        contact_id VARCHAR NOT NULL REFERENCES mcp_contacts(id) ON DELETE CASCADE,
-        last_message TEXT,
-        last_message_at TIMESTAMP,
-        unread_count INTEGER DEFAULT 0,
-        created_at TIMESTAMP NOT NULL DEFAULT now()
-      )
-    `);
-
-    await migDb.execute(sql`
-      CREATE TABLE IF NOT EXISTS mcp_messages (
-        id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
-        conversation_id VARCHAR NOT NULL REFERENCES mcp_conversations(id) ON DELETE CASCADE,
-        direction TEXT NOT NULL,
-        content TEXT,
-        media_type TEXT,
-        media_data TEXT,
-        media_filename TEXT,
-        audio_transcription TEXT,
-        wa_message_id TEXT UNIQUE,
-        timestamp TIMESTAMP NOT NULL,
-        is_read TEXT DEFAULT 'false',
-        created_at TIMESTAMP NOT NULL DEFAULT now()
-      )
-    `);
-
-    await migDb.execute(sql`
-      CREATE TABLE IF NOT EXISTS mcp_action_items (
-        id VARCHAR PRIMARY KEY DEFAULT gen_random_uuid(),
-        message_id VARCHAR REFERENCES mcp_messages(id) ON DELETE SET NULL,
-        title TEXT NOT NULL,
-        description TEXT,
-        status TEXT DEFAULT 'pending',
-        due_date TIMESTAMP,
-        external_id TEXT,
-        created_at TIMESTAMP NOT NULL DEFAULT now()
-      )
-    `);
-
-    await migDb.execute(sql`
-      CREATE TABLE IF NOT EXISTS mcp_sync_state (
-        id TEXT PRIMARY KEY DEFAULT 'default',
-        last_sync_at TIMESTAMP,
-        last_ack_id TEXT
-      )
-    `);
-
-    log("  Tables created OK");
-  } catch (err: any) {
-    log(`  Error creating tables: ${err.message}`);
-    process.exit(1);
-  }
-
-  // Step 4: Generate keypair
+  // Keypair
+  const { generateKeyPair, loadPrivateKey } = await import("../crypto.js");
   const keyPath = resolve(homedir(), ".vida", "private.key");
   let publicKeyBase64: string;
 
@@ -193,21 +193,15 @@ async function main() {
     const { publicKey, keyPath: savedPath } = generateKeyPair(keyPath);
     publicKeyBase64 = publicKey;
     log(`  Private key saved to ${savedPath}`);
-    log("  IMPORTANT: This key is your only way to decrypt messages.");
-    log("  Back it up securely. If you lose it, your messages are unrecoverable.");
+    log("  IMPORTANT: Back up this key. If lost, your messages are unrecoverable.");
   }
 
-  // Step 5: Register public key + activate webhooks
+  // Register public key
   log("  Registering public key and activating webhooks...");
-  try {
-    await relay.registerKey(publicKeyBase64);
-    log("  Webhooks activated OK");
-  } catch (err: any) {
-    log(`  Error: ${err.message}`);
-    process.exit(1);
-  }
+  await relay.registerKey(publicKeyBase64);
+  log("  Webhooks activated OK");
 
-  // Step 6: Auto-add config to Claude Code
+  // Write config
   const whatsappServer = {
     command: "npx",
     args: ["-y", "@vidaai/whatsapp-mcp"],
@@ -218,31 +212,59 @@ async function main() {
     },
   };
 
-  const mcpJsonPath = resolve(homedir(), ".claude", ".mcp.json");
-  let configWritten = false;
+  const written = writeConfigToClaude(whatsappServer);
+  printSuccess(written, whatsappServer);
+}
 
-  try {
-    // Read existing config or start fresh
-    let mcpConfig: any = { mcpServers: {} };
-    if (existsSync(mcpJsonPath)) {
-      const existing = readFileSync(mcpJsonPath, "utf-8");
-      mcpConfig = JSON.parse(existing);
-      if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
-    } else {
-      // Ensure ~/.claude/ directory exists
-      mkdirSync(dirname(mcpJsonPath), { recursive: true });
-    }
+// ── Baileys Setup ──
 
-    // Add/update whatsapp server entry
-    mcpConfig.mcpServers.whatsapp = whatsappServer;
-    writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf-8");
-    log(`  Config written to ${mcpJsonPath}`);
-    configWritten = true;
-  } catch (err: any) {
-    log(`  Could not auto-write config: ${err.message}`);
-    log("  You can add it manually (see below).");
+async function setupBaileys() {
+  // Neon DB
+  let neonUrl = await askForNeonUrl();
+  await setupDatabase(neonUrl);
+
+  // QR code scan
+  const { runBaileysSetup } = await import("../providers/baileys-setup.js");
+  const baileysAuthDir = resolve(homedir(), ".vida", "baileys-auth");
+
+  log("");
+  const result = await runBaileysSetup(baileysAuthDir);
+  log("");
+
+  // Write config
+  const whatsappServer = {
+    command: "npx",
+    args: ["-y", "@vidaai/whatsapp-mcp"],
+    env: {
+      VIDA_PROVIDER: "baileys",
+      NEON_DATABASE_URL: neonUrl,
+      VIDA_BAILEYS_AUTH: result.authDir,
+    },
+  };
+
+  const written = writeConfigToClaude(whatsappServer);
+  printSuccess(written, whatsappServer);
+}
+
+// ── Helpers ──
+
+async function askForNeonUrl(): Promise<string> {
+  let neonUrl = process.env.NEON_DATABASE_URL || "";
+  if (!neonUrl) {
+    log("");
+    log("  Your messages are stored in YOUR own database (we never have access).");
+    log("  You need a PostgreSQL database — Neon is free at neon.tech");
+    log("");
+    neonUrl = await ask("  Neon DATABASE_URL: ");
   }
+  if (!neonUrl.includes("postgresql") && !neonUrl.includes("postgres")) {
+    log("  Error: Invalid database URL. Should start with postgresql://");
+    process.exit(1);
+  }
+  return neonUrl;
+}
 
+function printSuccess(configWritten: boolean, whatsappServer: any) {
   log("");
   log("  Setup complete!");
   log("");
@@ -257,6 +279,29 @@ async function main() {
 
   log("  Restart Claude Code, then try: 'show me my WhatsApp messages'");
   log("");
+}
+
+// ── Main ──
+
+async function main() {
+  log("");
+  log("  WhatsApp MCP Setup");
+  log("  ==================");
+  log("");
+  log("  How do you want to connect WhatsApp?");
+  log("");
+  log("  [1] Cloud API — WhatsApp Business, official, E2E encrypted ($25/mo)");
+  log("  [2] Personal — WhatsApp personal, QR code scan ($25/mo)");
+  log("      Uses unofficial third-party API. VIDA AI is not affiliated.");
+  log("");
+
+  const choice = await ask("  Choose (1 or 2): ");
+
+  if (choice === "2") {
+    await setupBaileys();
+  } else {
+    await setupCloudApi();
+  }
 }
 
 main().catch((err) => {
