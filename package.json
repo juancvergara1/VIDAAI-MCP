@@ -1,6 +1,6 @@
 {
   "name": "@vidaai/whatsapp-mcp",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "WhatsApp MCP server for Claude Code — read, search, and send WhatsApp messages with E2E encryption",
   "type": "module",
   "bin": {
