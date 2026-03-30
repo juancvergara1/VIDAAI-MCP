@@ -1,0 +1,42 @@
+{
+  "name": "@vidaai/whatsapp-mcp",
+  "version": "0.1.0",
+  "description": "WhatsApp MCP server for Claude Code — read, search, and send WhatsApp messages with E2E encryption",
+  "type": "module",
+  "bin": {
+    "whatsapp-mcp": "./build/index.js",
+    "whatsapp-mcp-setup": "./build/bin/setup.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "check": "tsc --noEmit",
+    "setup": "node build/bin/setup.js"
+  },
+  "files": [
+    "build",
+    "drizzle"
+  ],
+  "keywords": [
+    "mcp",
+    "whatsapp",
+    "claude",
+    "anthropic",
+    "model-context-protocol"
+  ],
+  "author": "VIDA AI <hello@vidaai.co>",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@neondatabase/serverless": "^0.10.4",
+    "drizzle-orm": "^0.39.1",
+    "tweetnacl": "^1.0.3",
+    "tweetnacl-sealedbox-js": "^1.2.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "drizzle-kit": "^0.30.0",
+    "typescript": "^5.6.0"
+  }
+}
