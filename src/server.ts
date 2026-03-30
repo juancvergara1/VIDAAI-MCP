@@ -301,6 +301,158 @@ export async function startServer() {
     return { content: [{ type: "text" as const, text: `Action item ${actionItemId} marked as done.` }] };
   });
 
+  // ── Prompts ──
+
+  server.registerPrompt("daily-digest", {
+    title: "Daily Digest",
+    description: "Get a summary of today's WhatsApp messages grouped by contact, with key topics and action items.",
+  }, async () => ({
+    messages: [{
+      role: "user" as const,
+      content: {
+        type: "text" as const,
+        text: `Sync my WhatsApp messages, then give me a daily digest of today's conversations.
+
+For each contact who messaged today:
+- Contact name and number of messages
+- Key topics discussed
+- Any action items or follow-ups needed
+- Urgency level (high/medium/low)
+
+End with a "Pending actions" section listing anything I need to respond to or follow up on. Be concise and actionable.`,
+      },
+    }],
+  }));
+
+  server.registerPrompt("weekly-summary", {
+    title: "Weekly Summary",
+    description: "Get a weekly summary with most active contacts, key topics, and pending items.",
+  }, async () => {
+    const oneWeekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    return {
+      messages: [{
+        role: "user" as const,
+        content: {
+          type: "text" as const,
+          text: `Sync my WhatsApp messages, then give me a weekly summary of conversations from the last 7 days (since ${oneWeekAgo}).
+
+Include:
+1. **Most active contacts** — ranked by message count
+2. **Key topics this week** — main themes across conversations
+3. **Unresolved items** — conversations that need follow-up
+4. **Quick stats** — total messages received, sent, unique contacts
+
+Keep it brief and focused on what needs my attention.`,
+        },
+      }],
+    };
+  });
+
+  server.registerPrompt("pending-followups", {
+    title: "Pending Follow-ups",
+    description: "List conversations where you need to respond or follow up.",
+  }, async () => ({
+    messages: [{
+      role: "user" as const,
+      content: {
+        type: "text" as const,
+        text: `Sync my WhatsApp messages, then analyze my conversations to find pending follow-ups.
+
+Look for:
+1. **Conversations where I haven't replied** — someone sent me a message and I haven't responded
+2. **Conversations where I'm waiting** — I asked something and haven't gotten an answer
+3. **Stale conversations** — important threads that went quiet in the last few days
+
+For each, show: contact name, last message preview, how long ago, and suggested action. Sort by urgency.`,
+      },
+    }],
+  }));
+
+  server.registerPrompt("unread-brief", {
+    title: "Unread Brief",
+    description: "Quick sync and brief of all unread messages with suggested actions.",
+  }, async () => ({
+    messages: [{
+      role: "user" as const,
+      content: {
+        type: "text" as const,
+        text: `Sync my WhatsApp messages, then give me a quick brief of all unread messages.
+
+For each unread conversation:
+- Who sent it and when
+- One-line summary of what they said
+- Suggested quick reply (if applicable)
+
+Keep it short — I want to scan this in 30 seconds.`,
+      },
+    }],
+  }));
+
+  server.registerPrompt("generate-todo-report", {
+    title: "Generate To-Do Report",
+    description: "Analyze all conversations, extract action items, and generate a markdown to-do document with due dates and responsible parties.",
+    argsSchema: {
+      outputPath: z.string().optional().describe("Folder path to save the report (default: ./VIDA AI - WhatsApp To Dos)"),
+      since: z.string().optional().describe("Only analyze messages since this date (ISO format, default: last 7 days)"),
+    },
+  }, async ({ outputPath, since }) => {
+    const defaultSince = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const sinceDate = since || defaultSince;
+    const folder = outputPath || "./VIDA AI - WhatsApp To Dos";
+    const today = new Date().toISOString().split("T")[0];
+
+    return {
+      messages: [{
+        role: "user" as const,
+        content: {
+          type: "text" as const,
+          text: `Sync my WhatsApp messages, then analyze ALL conversations since ${sinceDate} to extract every action item, commitment, deadline, and follow-up.
+
+Then generate a markdown report and save it to: ${folder}/to-dos-${today}.md
+
+The report should have this structure:
+
+# WhatsApp To-Dos — ${today}
+
+## High Priority
+| Action Item | Responsible | Due Date | Source Conversation | Status |
+|------------|-------------|----------|-------------------|--------|
+(items that have explicit deadlines or urgency)
+
+## Follow-ups Needed
+| Action Item | Responsible | Context | Last Activity |
+|------------|-------------|---------|--------------|
+(conversations where someone owes me a response or I owe them one)
+
+## Commitments Made
+| What I Promised | To Whom | When | Context |
+|----------------|---------|------|---------|
+(things I said I would do)
+
+## Pending Decisions
+| Decision | Parties Involved | Context |
+|----------|-----------------|---------|
+(things that need a decision from me or someone else)
+
+## Notes
+(any other relevant context from conversations)
+
+---
+*Generated from WhatsApp conversations (${sinceDate} to ${today}) by VIDA AI WhatsApp MCP*
+
+Rules:
+- Extract REAL action items from message content — don't make things up
+- "Responsible" = who needs to take action (me or the contact name)
+- If there's no explicit due date, leave it blank or write "ASAP" if urgent
+- Include the contact name as "Source Conversation" so I know where it came from
+- Also create the existing action items from my database (whatsapp_list_action_items) in the report
+- Create the folder if it doesn't exist
+- Be thorough — scan every conversation`,
+        },
+      }],
+    };
+  });
+
   // ── Start ──
 
   const transport = new StdioServerTransport();
