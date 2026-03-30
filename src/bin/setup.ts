@@ -14,9 +14,9 @@
  */
 
 import { createInterface } from "readline";
-import { resolve } from "path";
+import { resolve, dirname } from "path";
 import { homedir } from "os";
-import { existsSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import { generateKeyPair, loadPrivateKey } from "../crypto.js";
 import { RelayClient } from "../relay-client.js";
 import { createDb } from "../db/index.js";
@@ -207,31 +207,55 @@ async function main() {
     process.exit(1);
   }
 
-  // Step 6: Print config
-  log("");
-  log("  Setup complete!");
-  log("");
-  log("  Add this to your ~/.claude/.mcp.json (Claude Code)");
-  log("  or claude_desktop_config.json (Claude Desktop):");
-  log("");
-
-  const config = {
-    mcpServers: {
-      whatsapp: {
-        command: "npx",
-        args: ["-y", "@vidaai/whatsapp-mcp"],
-        env: {
-          VIDA_API_KEY: apiKey,
-          NEON_DATABASE_URL: neonUrl,
-          VIDA_KEY_PATH: keyPath,
-        },
-      },
+  // Step 6: Auto-add config to Claude Code
+  const whatsappServer = {
+    command: "npx",
+    args: ["-y", "@vidaai/whatsapp-mcp"],
+    env: {
+      VIDA_API_KEY: apiKey,
+      NEON_DATABASE_URL: neonUrl,
+      VIDA_KEY_PATH: keyPath,
     },
   };
 
-  log(JSON.stringify(config, null, 2));
+  const mcpJsonPath = resolve(homedir(), ".claude", ".mcp.json");
+  let configWritten = false;
+
+  try {
+    // Read existing config or start fresh
+    let mcpConfig: any = { mcpServers: {} };
+    if (existsSync(mcpJsonPath)) {
+      const existing = readFileSync(mcpJsonPath, "utf-8");
+      mcpConfig = JSON.parse(existing);
+      if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+    } else {
+      // Ensure ~/.claude/ directory exists
+      mkdirSync(dirname(mcpJsonPath), { recursive: true });
+    }
+
+    // Add/update whatsapp server entry
+    mcpConfig.mcpServers.whatsapp = whatsappServer;
+    writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf-8");
+    log(`  Config written to ${mcpJsonPath}`);
+    configWritten = true;
+  } catch (err: any) {
+    log(`  Could not auto-write config: ${err.message}`);
+    log("  You can add it manually (see below).");
+  }
+
   log("");
-  log("  Then open Claude Code and try: 'show me my WhatsApp messages'");
+  log("  Setup complete!");
+  log("");
+
+  if (!configWritten) {
+    log("  Add this to your ~/.claude/.mcp.json (Claude Code)");
+    log("  or claude_desktop_config.json (Claude Desktop):");
+    log("");
+    log(JSON.stringify({ mcpServers: { whatsapp: whatsappServer } }, null, 2));
+    log("");
+  }
+
+  log("  Restart Claude Code, then try: 'show me my WhatsApp messages'");
   log("");
 }
 
