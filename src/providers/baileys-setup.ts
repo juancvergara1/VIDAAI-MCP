@@ -28,7 +28,8 @@ export async function runBaileysSetup(authDir: string): Promise<BaileysSetupResu
   const makeWASocket = baileys.default;
   const { useMultiFileAuthState, DisconnectReason } = baileys;
   const pino = (await import("pino")).default;
-  const qrcode = await import("qrcode-terminal");
+  const qrcodeModule = await import("qrcode-terminal");
+  const qrcode = qrcodeModule.default || qrcodeModule;
 
   const { mkdirSync } = await import("fs");
   mkdirSync(resolvedDir, { recursive: true });
