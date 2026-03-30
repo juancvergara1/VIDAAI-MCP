@@ -7,7 +7,8 @@
  */
 
 import nacl from "tweetnacl";
-import { open } from "tweetnacl-sealedbox-js";
+import sealedBox from "tweetnacl-sealedbox-js";
+const { open } = sealedBox;
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { resolve, dirname } from "path";
 import { homedir } from "os";
