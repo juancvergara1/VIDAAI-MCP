@@ -1,9 +1,12 @@
 /**
  * WhatsApp MCP Server — core implementation.
  *
- * Connects to VIDA AI relay for encrypted message sync.
+ * Supports two providers:
+ * - Cloud API (default): VIDA AI relay with E2E encryption
+ * - Baileys: Local WebSocket, personal WhatsApp
+ *
+ * Provider selected via VIDA_PROVIDER env var ("cloud" | "baileys").
  * All messages stored in user's own Neon database.
- * Private key never leaves this machine.
  *
  * IMPORTANT: Never use console.log() — it corrupts stdio JSON-RPC.
  * Use console.error() for all logging.
@@ -15,47 +18,73 @@ import { z } from "zod";
 import { createDb } from "./db/index.js";
 import { contacts, conversations, messages, actionItems } from "./db/schema.js";
 import { eq, desc, and, gte, lte, sql } from "drizzle-orm";
-import { RelayClient } from "./relay-client.js";
-import { loadPrivateKey } from "./crypto.js";
-import { syncMessages } from "./tools/sync.js";
+import { createProvider, type IWhatsAppProvider, type ProviderType } from "./providers/index.js";
 
 export async function startServer() {
   // ── Environment ──
 
-  const VIDA_API_KEY = process.env.VIDA_API_KEY;
+  const PROVIDER = (process.env.VIDA_PROVIDER || "cloud") as ProviderType;
   const NEON_URL = process.env.NEON_DATABASE_URL;
-  const KEY_PATH = process.env.VIDA_KEY_PATH;
 
-  if (!VIDA_API_KEY) {
-    console.error("Missing VIDA_API_KEY. Get one at vidaai.co/mcp");
-    process.exit(1);
-  }
   if (!NEON_URL) {
     console.error("Missing NEON_DATABASE_URL. Add your Neon connection string.");
     process.exit(1);
   }
 
-  const db = createDb(NEON_URL);
-  const relay = new RelayClient(VIDA_API_KEY);
+  // Cloud API requires API key + private key
+  if (PROVIDER === "cloud") {
+    if (!process.env.VIDA_API_KEY) {
+      console.error("Missing VIDA_API_KEY. Get one at vidaai.co/mcp");
+      process.exit(1);
+    }
+  }
 
-  let publicKey: Uint8Array;
-  let secretKey: Uint8Array;
+  // Baileys requires auth directory
+  if (PROVIDER === "baileys") {
+    if (!process.env.VIDA_BAILEYS_AUTH) {
+      console.error("Missing VIDA_BAILEYS_AUTH. Run 'npx @vidaai/whatsapp-mcp setup' to configure.");
+      process.exit(1);
+    }
+  }
+
+  const db = createDb(NEON_URL);
+
+  // ── Provider ──
+
+  let provider: IWhatsAppProvider;
   try {
-    const keys = loadPrivateKey(KEY_PATH);
-    publicKey = keys.publicKey;
-    secretKey = keys.secretKey;
+    provider = await createProvider({
+      provider: PROVIDER,
+      db,
+      apiKey: process.env.VIDA_API_KEY,
+      keyPath: process.env.VIDA_KEY_PATH,
+      baileysAuthDir: process.env.VIDA_BAILEYS_AUTH,
+    });
+    await provider.init();
+    console.error(`[MCP] Provider "${PROVIDER}" initialized.`);
   } catch (err: any) {
-    console.error(`Failed to load private key: ${err.message}`);
-    console.error(`Run 'npx @vidaai/whatsapp-mcp setup' to generate your keypair.`);
+    console.error(`[MCP] Failed to initialize provider "${PROVIDER}": ${err.message}`);
+    if (PROVIDER === "cloud") {
+      console.error("Run 'npx @vidaai/whatsapp-mcp setup' to generate your keypair.");
+    } else {
+      console.error("Run 'npx @vidaai/whatsapp-mcp setup' to reconnect WhatsApp.");
+    }
     process.exit(1);
   }
+
+  // Cleanup on exit
+  process.on("SIGINT", async () => { await provider.destroy(); process.exit(0); });
+  process.on("SIGTERM", async () => { await provider.destroy(); process.exit(0); });
 
   // ── MCP Server ──
 
   const server = new McpServer({
     name: "whatsapp",
-    version: "0.1.0",
+    version: "0.3.0",
   });
+
+  // Helper: sync with error swallowing (used by read tools)
+  const doSync = () => provider.syncMessages(db).catch(() => 0);
 
   // ── Tools ──
 
@@ -63,7 +92,7 @@ export async function startServer() {
     description: "Sync new WhatsApp messages from relay. Call this before reading messages to get the latest.",
     inputSchema: {},
   }, async () => {
-    const count = await syncMessages(relay, db, publicKey, secretKey);
+    const count = await provider.syncMessages(db);
     return { content: [{ type: "text" as const, text: count > 0 ? `Synced ${count} new messages.` : "Already up to date." }] };
   });
 
@@ -73,7 +102,7 @@ export async function startServer() {
       limit: z.number().optional().describe("Max conversations to return (default 20)"),
     },
   }, async ({ limit }) => {
-    await syncMessages(relay, db, publicKey, secretKey).catch(() => {});
+    await doSync();
 
     const convs = await db.query.conversations.findMany({
       limit: limit || 20,
@@ -101,7 +130,7 @@ export async function startServer() {
       limit: z.number().optional().describe("Max messages to return (default 30)"),
     },
   }, async ({ contact, conversationId, limit }) => {
-    await syncMessages(relay, db, publicKey, secretKey).catch(() => {});
+    await doSync();
 
     let convId = conversationId;
 
@@ -154,7 +183,7 @@ export async function startServer() {
       limit: z.number().optional().describe("Max results (default 20)"),
     },
   }, async ({ query, from, since, until, limit: maxResults }) => {
-    await syncMessages(relay, db, publicKey, secretKey).catch(() => {});
+    await doSync();
 
     const conditions = [sql`lower(${messages.content}) like ${"%" + query.toLowerCase() + "%"}`];
     if (since) conditions.push(gte(messages.timestamp, new Date(since)));
@@ -210,7 +239,7 @@ export async function startServer() {
       }
     }
 
-    const result = await relay.sendMessage(phone, text);
+    const result = await provider.sendMessage(phone, text);
 
     if (result.success) {
       return { content: [{ type: "text" as const, text: `Message sent to ${phone}.` }] };
@@ -223,7 +252,7 @@ export async function startServer() {
     description: "Get a summary of unread messages across all conversations.",
     inputSchema: {},
   }, async () => {
-    await syncMessages(relay, db, publicKey, secretKey).catch(() => {});
+    await doSync();
 
     const unreadConvs = await db.query.conversations.findMany({
       where: sql`${conversations.unreadCount} > 0`,

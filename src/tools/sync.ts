@@ -1,12 +1,19 @@
 /**
- * Sync engine — pulls encrypted messages from relay, decrypts, writes to user's Neon.
+ * Cloud API sync engine — pulls encrypted messages from relay, decrypts, writes to user's Neon.
  */
 
-import { eq, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { UserDb } from "../db/index.js";
-import { contacts, conversations, messages, syncState } from "../db/schema.js";
+import { syncState } from "../db/schema.js";
 import { sealDecrypt } from "../crypto.js";
 import type { RelayClient } from "../relay-client.js";
+import {
+  upsertContact,
+  upsertConversation,
+  insertMessage,
+  updateConversationAfterMessage,
+  updateContactLastMessage,
+} from "./sync-common.js";
 
 interface DecryptedMessage {
   type: string;
@@ -50,34 +57,9 @@ export async function syncMessages(
       const phone = msg.senderPhone;
       const contactName = data.contacts?.[0]?.name || null;
 
-      // Get or create contact
-      let contact = await db.query.contacts.findFirst({
-        where: eq(contacts.phone, phone),
-      });
-
-      if (!contact) {
-        const [newContact] = await db.insert(contacts).values({
-          phone,
-          name: contactName,
-          profileName: contactName,
-        }).returning();
-        contact = newContact;
-      } else if (contactName && !contact.name) {
-        // Update name if we have it now
-        await db.update(contacts).set({ name: contactName }).where(eq(contacts.id, contact.id));
-      }
-
-      // Get or create conversation
-      let conversation = await db.query.conversations.findFirst({
-        where: eq(conversations.contactId, contact.id),
-      });
-
-      if (!conversation) {
-        const [newConv] = await db.insert(conversations).values({
-          contactId: contact.id,
-        }).returning();
-        conversation = newConv;
-      }
+      // Get or create contact + conversation
+      const contact = await upsertContact(db, phone, contactName, contactName);
+      const conversation = await upsertConversation(db, contact.id);
 
       // Decrypt media if present
       let mediaData: string | null = null;
@@ -92,48 +74,35 @@ export async function syncMessages(
       }
 
       // Insert message (dedup by waMessageId)
-      try {
-        await db.insert(messages).values({
-          conversationId: conversation.id,
-          direction: msg.direction,
-          content: data.text || audioTranscription || null,
-          mediaType: msg.mediaType,
-          mediaData,
-          audioTranscription,
-          waMessageId: msg.waMessageId,
-          timestamp: new Date(data.timestamp),
-          isRead: msg.direction === "outbound" ? "true" : "false",
-        });
-      } catch (insertErr: any) {
-        // Unique constraint on waMessageId — already synced
-        if (insertErr.message?.includes("unique") || insertErr.code === "23505") {
-          ackIds.push(msg.id);
-          continue;
-        }
-        throw insertErr;
+      const inserted = await insertMessage(db, conversation.id, {
+        direction: msg.direction as "inbound" | "outbound",
+        content: data.text || audioTranscription || null,
+        mediaType: msg.mediaType,
+        mediaData,
+        audioTranscription,
+        waMessageId: msg.waMessageId,
+        timestamp: new Date(data.timestamp),
+      });
+
+      if (!inserted) {
+        // Duplicate — still ack it
+        ackIds.push(msg.id);
+        continue;
       }
 
-      // Update conversation metadata (atomic increment for unread count)
-      await db.update(conversations).set({
-        lastMessage: data.text || `[${msg.mediaType || "media"}]`,
-        lastMessageAt: new Date(data.timestamp),
-        ...(msg.direction === "inbound" ? { unreadCount: sql`coalesce(${conversations.unreadCount}, 0) + 1` } : {}),
-      }).where(eq(conversations.id, conversation.id));
-
-      // Update contact last message time
-      await db.update(contacts).set({
-        lastMessageAt: new Date(data.timestamp),
-      }).where(eq(contacts.id, contact.id));
+      // Update conversation + contact metadata
+      const lastMessageText = data.text || `[${msg.mediaType || "media"}]`;
+      await updateConversationAfterMessage(db, conversation.id, lastMessageText, new Date(data.timestamp), msg.direction === "inbound");
+      await updateContactLastMessage(db, contact.id, new Date(data.timestamp));
 
       ackIds.push(msg.id);
       synced++;
     } catch (err: any) {
       console.error(`[Sync] Error processing message ${msg.id}:`, err.message);
-      // Continue with next message — don't ack this one
     }
   }
 
-  // Update sync state BEFORE acking (if crash after ack but before state update, messages lost)
+  // Update sync state BEFORE acking
   if (ackIds.length > 0) {
     const now = new Date();
     const existing = await db.select().from(syncState).limit(1);
@@ -143,7 +112,6 @@ export async function syncMessages(
       await db.insert(syncState).values({ id: "default", lastSyncAt: now });
     }
 
-    // Now safe to ack — if we crash here, relay re-delivers but dedup catches it
     await relay.ackMessages(ackIds);
   }
 
