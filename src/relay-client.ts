@@ -37,31 +37,54 @@ export class RelayClient {
     this.baseUrl = (baseUrl || DEFAULT_RELAY_URL).replace(/\/$/, "");
   }
 
-  private async request(method: string, path: string, body?: any): Promise<any> {
+  private async request(method: string, path: string, body?: any, retries = 2): Promise<any> {
     const url = `${this.baseUrl}/api/mcp${path}`;
     const headers: Record<string, string> = {
       "x-mcp-api-key": this.apiKey,
       "Content-Type": "application/json",
     };
 
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await fetch(url, {
+          method,
+          headers,
+          body: body ? JSON.stringify(body) : undefined,
+          signal: AbortSignal.timeout(15000), // 15s timeout
+        });
 
-    let data: any;
-    try {
-      data = await res.json();
-    } catch {
-      throw new Error(`Relay unreachable or returned invalid response (HTTP ${res.status})`);
+        let data: any;
+        try {
+          data = await res.json();
+        } catch {
+          throw new Error(`Relay returned invalid response (HTTP ${res.status})`);
+        }
+
+        if (!res.ok) {
+          // Don't retry client errors (4xx)
+          if (res.status >= 400 && res.status < 500) {
+            throw new Error(data.error || `Relay API error: ${res.status}`);
+          }
+          // Retry server errors (5xx)
+          throw new Error(data.error || `Relay server error: ${res.status}`);
+        }
+
+        return data;
+      } catch (err: any) {
+        const isLastAttempt = attempt === retries;
+        const isClientError = err.message?.includes("API error");
+
+        if (isLastAttempt || isClientError) {
+          throw err;
+        }
+
+        // Wait before retry (exponential backoff: 1s, 2s)
+        await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+        console.error(`[Relay] Retrying ${method} ${path} (attempt ${attempt + 2}/${retries + 1})`);
+      }
     }
 
-    if (!res.ok) {
-      throw new Error(data.error || `Relay API error: ${res.status}`);
-    }
-
-    return data;
+    throw new Error("Relay request failed after retries");
   }
 
   /**
