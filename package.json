@@ -29,13 +29,17 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@neondatabase/serverless": "^0.10.4",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "drizzle-orm": "^0.39.1",
+    "pino": "^10.3.1",
+    "qrcode-terminal": "^0.12.0",
     "tweetnacl": "^1.0.3",
     "tweetnacl-sealedbox-js": "^1.2.0",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/qrcode-terminal": "^0.12.2",
     "drizzle-kit": "^0.30.0",
     "typescript": "^5.6.0"
   }

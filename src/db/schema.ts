@@ -22,6 +22,7 @@ export const conversations = pgTable("mcp_conversations", {
   lastMessage: text("last_message"),
   lastMessageAt: timestamp("last_message_at"),
   unreadCount: integer("unread_count").default(0),
+  isGroup: text("is_group").default("false"), // "true" for group conversations (Baileys)
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 
