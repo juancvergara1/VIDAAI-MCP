@@ -4,8 +4,8 @@
   "description": "WhatsApp MCP server for Claude Code — read, search, and send WhatsApp messages with E2E encryption",
   "type": "module",
   "bin": {
-    "whatsapp-mcp": "./build/index.js",
-    "whatsapp-mcp-setup": "./build/bin/setup.js"
+    "whatsapp-mcp": "build/index.js",
+    "whatsapp-mcp-setup": "build/bin/setup.js"
   },
   "scripts": {
     "build": "tsc",
