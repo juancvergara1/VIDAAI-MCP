@@ -232,6 +232,13 @@ export async function startServer() {
       });
       if (matched) {
         phone = matched.phone;
+        // Check if this contact has a group conversation — if so, use @g.us JID
+        const conv = await db.query.conversations.findFirst({
+          where: sql`${conversations.contactId} = ${matched.id} AND ${conversations.isGroup} = 'true'`,
+        });
+        if (conv) {
+          phone = `${matched.phone}@g.us`;
+        }
       } else {
         return { content: [{ type: "text" as const, text: `Contact "${to}" not found. Use a phone number instead.` }] };
       }
@@ -266,6 +273,13 @@ export async function startServer() {
       });
       if (matched) {
         phone = matched.phone;
+        // Check if this contact has a group conversation — if so, use @g.us JID
+        const conv = await db.query.conversations.findFirst({
+          where: sql`${conversations.contactId} = ${matched.id} AND ${conversations.isGroup} = 'true'`,
+        });
+        if (conv) {
+          phone = `${matched.phone}@g.us`;
+        }
       } else {
         return { content: [{ type: "text" as const, text: `Contact "${to}" not found. Use a phone number instead.` }] };
       }

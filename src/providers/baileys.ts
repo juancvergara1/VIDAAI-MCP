@@ -188,7 +188,8 @@ export class BaileysProvider implements IWhatsAppProvider {
       }
 
       // Write outbound message to DB
-      const phone = to.replace(/\D/g, "");
+      const isGroup = jid.endsWith("@g.us");
+      const phone = jid.replace("@s.whatsapp.net", "").replace("@g.us", "");
       const contact = await upsertContact(this.db, phone);
       const conversation = await upsertConversation(this.db, contact.id);
       await insertMessage(this.db, conversation.id, {
@@ -196,6 +197,7 @@ export class BaileysProvider implements IWhatsAppProvider {
         content: text,
         waMessageId,
         timestamp: new Date(),
+        isGroup,
       });
       await updateConversationAfterMessage(this.db, conversation.id, text, new Date(), false);
       await updateContactLastMessage(this.db, contact.id, new Date());
@@ -273,7 +275,8 @@ export class BaileysProvider implements IWhatsAppProvider {
         }
 
         // Write outbound message to DB
-        const phone = to.replace(/\D/g, "");
+        const isGroup = jid.endsWith("@g.us");
+        const phone = jid.replace("@s.whatsapp.net", "").replace("@g.us", "");
         const contact = await upsertContact(this.db, phone);
         const conversation = await upsertConversation(this.db, contact.id);
         const mediaType = mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : mime.startsWith("audio/") ? "audio" : "document";
@@ -283,6 +286,7 @@ export class BaileysProvider implements IWhatsAppProvider {
           mediaType,
           waMessageId,
           timestamp: new Date(),
+          isGroup,
         });
         await updateConversationAfterMessage(this.db, conversation.id, media.caption || `[${mediaType}]`, new Date(), false);
         await updateContactLastMessage(this.db, contact.id, new Date());
