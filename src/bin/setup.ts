@@ -121,7 +121,11 @@ async function setupDatabase(neonUrl: string) {
 
 function writeConfigToClaude(whatsappServer: any): boolean {
   const mcpJsonPath = resolve(homedir(), ".claude", ".mcp.json");
+  const claudeJsonPath = resolve(homedir(), ".claude.json");
 
+  let success = false;
+
+  // Write to .mcp.json (primary config for Claude Code CLI)
   try {
     let mcpConfig: any = { mcpServers: {} };
     if (existsSync(mcpJsonPath)) {
@@ -135,11 +139,28 @@ function writeConfigToClaude(whatsappServer: any): boolean {
     mcpConfig.mcpServers.whatsapp = whatsappServer;
     writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf-8");
     log(`  Config written to ${mcpJsonPath}`);
-    return true;
+    success = true;
   } catch (err: any) {
-    log(`  Could not auto-write config: ${err.message}`);
-    return false;
+    log(`  Could not write to .mcp.json: ${err.message}`);
   }
+
+  // Also update .claude.json if it has an existing whatsapp MCP config
+  // This prevents stale configs from overriding the correct one
+  try {
+    if (existsSync(claudeJsonPath)) {
+      const raw = readFileSync(claudeJsonPath, "utf-8");
+      const claudeConfig = JSON.parse(raw);
+      if (claudeConfig.mcpServers?.whatsapp) {
+        claudeConfig.mcpServers.whatsapp = whatsappServer;
+        writeFileSync(claudeJsonPath, JSON.stringify(claudeConfig, null, 2) + "\n", "utf-8");
+        log(`  Updated existing config in ${claudeJsonPath}`);
+      }
+    }
+  } catch {
+    // Non-critical — .mcp.json is the primary config
+  }
+
+  return success;
 }
 
 // ── Cloud API Setup ──
@@ -300,6 +321,26 @@ function printSuccess(configWritten: boolean, whatsappServer: any) {
     log("");
     log(JSON.stringify({ mcpServers: { whatsapp: whatsappServer } }, null, 2));
     log("");
+  }
+
+  // Check for Claude Desktop config that might need manual update
+  const desktopConfigPaths = [
+    resolve(process.env.APPDATA || "", "Claude", "claude_desktop_config.json"),          // Windows
+    resolve(homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json"), // macOS
+  ];
+
+  for (const p of desktopConfigPaths) {
+    try {
+      if (existsSync(p)) {
+        const raw = readFileSync(p, "utf-8");
+        const cfg = JSON.parse(raw);
+        if (cfg.mcpServers?.whatsapp) {
+          log(`  Note: Found WhatsApp config in Claude Desktop (${p}).`);
+          log("  If you use Claude Desktop, update that config too or remove it to avoid conflicts.");
+          log("");
+        }
+      }
+    } catch { /* ignore */ }
   }
 
   log("  Restart Claude Code, then try: 'show me my WhatsApp messages'");
