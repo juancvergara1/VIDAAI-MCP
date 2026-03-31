@@ -30,6 +30,9 @@ export class BaileysProvider implements IWhatsAppProvider {
   private sock: any = null;
   // Track message IDs sent via sendMessage() to avoid double-write in processMessage()
   private recentSentIds = new Set<string>();
+  // Track unique conversations from historical sync (limit to 10)
+  private historicalJids = new Set<string>();
+  private static readonly MAX_HISTORICAL_CONVERSATIONS = 10;
 
   // Baileys modules (loaded once in init, reused in reconnect)
   private makeWASocket: any;
@@ -128,13 +131,21 @@ export class BaileysProvider implements IWhatsAppProvider {
       this.sock.ev.on("connection.update", this.onConnectionUpdate);
     }
 
-    // Handle incoming messages — write to DB in real-time
+    // Handle incoming + historical messages — write to DB
+    // "notify" = real-time new messages, "append" = historical sync
     this.sock.ev.on("messages.upsert", async (event: any) => {
       const { messages: msgs, type } = event;
-      if (type !== "notify") return;
 
       for (const msg of msgs) {
         try {
+          // For historical sync, limit to MAX_HISTORICAL_CONVERSATIONS unique chats
+          if (type === "append") {
+            const jid = msg.key?.remoteJid || "";
+            if (!this.historicalJids.has(jid)) {
+              if (this.historicalJids.size >= BaileysProvider.MAX_HISTORICAL_CONVERSATIONS) continue;
+              this.historicalJids.add(jid);
+            }
+          }
           await this.processMessage(msg);
         } catch (err: any) {
           console.error("[Baileys] Error processing message:", err.message);
