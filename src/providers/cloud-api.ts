@@ -3,7 +3,7 @@
  * Wraps the existing RelayClient + sealed box crypto.
  */
 
-import type { IWhatsAppProvider, SendResult } from "./types.js";
+import type { IWhatsAppProvider, SendResult, MediaMessage } from "./types.js";
 import type { UserDb } from "../db/index.js";
 import { RelayClient } from "../relay-client.js";
 import { loadPrivateKey } from "../crypto.js";
@@ -39,6 +39,10 @@ export class CloudApiProvider implements IWhatsAppProvider {
 
   async sendMessage(to: string, text: string): Promise<SendResult> {
     return this.relay.sendMessage(to, text);
+  }
+
+  async sendMedia(_to: string, _media: MediaMessage): Promise<SendResult> {
+    return { success: false, error: "Media sending is not supported with Cloud API provider. Use Baileys provider instead." };
   }
 
   async destroy(): Promise<void> {

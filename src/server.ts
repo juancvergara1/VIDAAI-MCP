@@ -246,6 +246,59 @@ export async function startServer() {
     }
   });
 
+  server.registerTool("whatsapp_send_file", {
+    description: "Send a file (image, video, PDF, document) via WhatsApp.",
+    inputSchema: {
+      to: z.string().describe("Contact name or phone number"),
+      filePath: z.string().describe("Absolute file path or URL to the media"),
+      mimeType: z.string().optional().describe("MIME type (e.g. image/jpeg, video/mp4, application/pdf). Auto-detected from extension if omitted."),
+      fileName: z.string().optional().describe("Display filename (e.g. proposal.pdf)"),
+      caption: z.string().optional().describe("Optional caption to send with the file"),
+    },
+    annotations: { destructiveHint: true },
+  }, async ({ to, filePath, mimeType, fileName, caption }) => {
+    let phone = to.replace(/\D/g, "");
+
+    if (phone.length < 10) {
+      const searchTerm = `%${to.toLowerCase()}%`;
+      const matched = await db.query.contacts.findFirst({
+        where: sql`lower(${contacts.name}) like ${searchTerm}`,
+      });
+      if (matched) {
+        phone = matched.phone;
+      } else {
+        return { content: [{ type: "text" as const, text: `Contact "${to}" not found. Use a phone number instead.` }] };
+      }
+    }
+
+    // Auto-detect MIME type from extension if not provided
+    const ext = filePath.split(".").pop()?.toLowerCase() || "";
+    const mimeMap: Record<string, string> = {
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+      mp4: "video/mp4", mov: "video/quicktime", avi: "video/x-msvideo",
+      mp3: "audio/mpeg", ogg: "audio/ogg", wav: "audio/wav",
+      pdf: "application/pdf", doc: "application/msword",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      xls: "application/vnd.ms-excel",
+      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    };
+    const resolvedMime = mimeType || mimeMap[ext] || "application/octet-stream";
+    const resolvedFileName = fileName || filePath.split(/[/\\]/).pop() || "file";
+
+    const result = await provider.sendMedia(phone, {
+      source: filePath,
+      mimetype: resolvedMime,
+      fileName: resolvedFileName,
+      caption,
+    });
+
+    if (result.success) {
+      return { content: [{ type: "text" as const, text: `File "${resolvedFileName}" sent to ${phone}.` }] };
+    } else {
+      return { content: [{ type: "text" as const, text: `Failed to send file: ${result.error}` }] };
+    }
+  });
+
   server.registerTool("whatsapp_unread_summary", {
     description: "Get a summary of unread messages across all conversations.",
     inputSchema: {},
