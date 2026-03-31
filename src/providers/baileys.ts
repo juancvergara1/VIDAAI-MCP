@@ -29,6 +29,7 @@ export class BaileysProvider implements IWhatsAppProvider {
   private db: UserDb;
   private authDir: string;
   private sock: any = null;
+  private connected = false;
   // Track message IDs sent via sendMessage() to avoid double-write in processMessage()
   private recentSentIds = new Set<string>();
   // Track unique conversations from historical sync (limit to 10)
@@ -73,13 +74,17 @@ export class BaileysProvider implements IWhatsAppProvider {
       this.onConnectionUpdate = async (update: any) => {
         const { connection, lastDisconnect } = update;
 
-        if (connection === "open" && !settled) {
-          settled = true;
-          console.error("[Baileys] Connected to WhatsApp.");
-          resolveInit();
+        if (connection === "open") {
+          this.connected = true;
+          if (!settled) {
+            settled = true;
+            console.error("[Baileys] Connected to WhatsApp.");
+            resolveInit();
+          }
         }
 
         if (connection === "close") {
+          this.connected = false;
           const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
           const shouldReconnect = statusCode !== this.DisconnectReason.loggedOut;
 
@@ -164,6 +169,12 @@ export class BaileysProvider implements IWhatsAppProvider {
       return { success: false, error: "Not connected to WhatsApp." };
     }
 
+    if (!this.connected) {
+      console.error("[Baileys] Socket not connected, waiting for reconnection...");
+      const ok = await this.waitForConnection();
+      if (!ok) return { success: false, error: "Connection timed out waiting for reconnect." };
+    }
+
     try {
       const jid = to.includes("@") ? to : `${to.replace(/\D/g, "")}@s.whatsapp.net`;
 
@@ -196,69 +207,103 @@ export class BaileysProvider implements IWhatsAppProvider {
     }
   }
 
+  /**
+   * Wait for the socket to be in a connected state, with timeout.
+   */
+  private async waitForConnection(timeoutMs = 10000): Promise<boolean> {
+    if (this.connected && this.sock) return true;
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 500));
+      if (this.connected && this.sock) return true;
+    }
+    return false;
+  }
+
   async sendMedia(to: string, media: MediaMessage): Promise<SendResult> {
     if (!this.sock) {
       return { success: false, error: "Not connected to WhatsApp." };
     }
 
-    try {
-      const jid = to.includes("@") ? to : `${to.replace(/\D/g, "")}@s.whatsapp.net`;
-
-      // Load media from file path or URL
-      let buffer: Buffer;
-      if (media.source.startsWith("http://") || media.source.startsWith("https://")) {
-        const res = await fetch(media.source);
-        if (!res.ok) return { success: false, error: `Failed to fetch media: ${res.statusText}` };
-        buffer = Buffer.from(await res.arrayBuffer());
-      } else {
-        if (!existsSync(media.source)) {
-          return { success: false, error: `File not found: ${media.source}` };
-        }
-        buffer = readFileSync(media.source);
-      }
-
-      // Build message based on MIME type
-      const mime = media.mimetype.toLowerCase();
-      let msgContent: any;
-
-      if (mime.startsWith("image/")) {
-        msgContent = { image: buffer, mimetype: media.mimetype, caption: media.caption };
-      } else if (mime.startsWith("video/")) {
-        msgContent = { video: buffer, mimetype: media.mimetype, caption: media.caption };
-      } else if (mime.startsWith("audio/")) {
-        msgContent = { audio: buffer, mimetype: media.mimetype };
-      } else {
-        msgContent = { document: buffer, mimetype: media.mimetype, fileName: media.fileName || "file", caption: media.caption };
-      }
-
-      const sent = await this.sock.sendMessage(jid, msgContent);
-      const waMessageId = sent?.key?.id || null;
-
-      if (waMessageId) {
-        this.recentSentIds.add(waMessageId);
-        setTimeout(() => this.recentSentIds.delete(waMessageId), 30000);
-      }
-
-      // Write outbound message to DB
-      const phone = to.replace(/\D/g, "");
-      const contact = await upsertContact(this.db, phone);
-      const conversation = await upsertConversation(this.db, contact.id);
-      const mediaType = mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : mime.startsWith("audio/") ? "audio" : "document";
-      await insertMessage(this.db, conversation.id, {
-        direction: "outbound",
-        content: media.caption || `[${mediaType}: ${media.fileName || "file"}]`,
-        mediaType,
-        waMessageId,
-        timestamp: new Date(),
-      });
-      await updateConversationAfterMessage(this.db, conversation.id, media.caption || `[${mediaType}]`, new Date(), false);
-      await updateContactLastMessage(this.db, contact.id, new Date());
-
-      return { success: true, waMessageId: waMessageId || undefined };
-    } catch (err: any) {
-      console.error("[Baileys] Send media error:", err.message);
-      return { success: false, error: err.message };
+    // Wait for connection if socket exists but isn't ready
+    if (!this.connected) {
+      console.error("[Baileys] Socket not connected, waiting for reconnection...");
+      const ok = await this.waitForConnection();
+      if (!ok) return { success: false, error: "Connection timed out waiting for reconnect." };
     }
+
+    const maxRetries = 2;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const jid = to.includes("@") ? to : `${to.replace(/\D/g, "")}@s.whatsapp.net`;
+
+        // Load media from file path or URL
+        let buffer: Buffer;
+        if (media.source.startsWith("http://") || media.source.startsWith("https://")) {
+          const res = await fetch(media.source);
+          if (!res.ok) return { success: false, error: `Failed to fetch media: ${res.statusText}` };
+          buffer = Buffer.from(await res.arrayBuffer());
+        } else {
+          if (!existsSync(media.source)) {
+            return { success: false, error: `File not found: ${media.source}` };
+          }
+          buffer = readFileSync(media.source);
+        }
+
+        // Build message based on MIME type
+        const mime = media.mimetype.toLowerCase();
+        let msgContent: any;
+
+        if (mime.startsWith("image/")) {
+          msgContent = { image: buffer, mimetype: media.mimetype, caption: media.caption };
+        } else if (mime.startsWith("video/")) {
+          msgContent = { video: buffer, mimetype: media.mimetype, caption: media.caption };
+        } else if (mime.startsWith("audio/")) {
+          msgContent = { audio: buffer, mimetype: media.mimetype };
+        } else {
+          msgContent = { document: buffer, mimetype: media.mimetype, fileName: media.fileName || "file", caption: media.caption };
+        }
+
+        const sent = await this.sock.sendMessage(jid, msgContent);
+        const waMessageId = sent?.key?.id || null;
+
+        if (waMessageId) {
+          this.recentSentIds.add(waMessageId);
+          setTimeout(() => this.recentSentIds.delete(waMessageId), 30000);
+        }
+
+        // Write outbound message to DB
+        const phone = to.replace(/\D/g, "");
+        const contact = await upsertContact(this.db, phone);
+        const conversation = await upsertConversation(this.db, contact.id);
+        const mediaType = mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : mime.startsWith("audio/") ? "audio" : "document";
+        await insertMessage(this.db, conversation.id, {
+          direction: "outbound",
+          content: media.caption || `[${mediaType}: ${media.fileName || "file"}]`,
+          mediaType,
+          waMessageId,
+          timestamp: new Date(),
+        });
+        await updateConversationAfterMessage(this.db, conversation.id, media.caption || `[${mediaType}]`, new Date(), false);
+        await updateContactLastMessage(this.db, contact.id, new Date());
+
+        return { success: true, waMessageId: waMessageId || undefined };
+      } catch (err: any) {
+        console.error(`[Baileys] Send media error (attempt ${attempt + 1}/${maxRetries + 1}):`, err.message);
+
+        // If connection closed and we have retries left, wait for reconnect and retry
+        if (attempt < maxRetries && (err.message?.includes("Connection Closed") || err.message?.includes("connection closed"))) {
+          console.error("[Baileys] Waiting for reconnection before retry...");
+          const ok = await this.waitForConnection();
+          if (!ok) return { success: false, error: "Connection lost and reconnect timed out." };
+          continue;
+        }
+
+        return { success: false, error: err.message };
+      }
+    }
+
+    return { success: false, error: "Max retries exceeded." };
   }
 
   async destroy(): Promise<void> {
