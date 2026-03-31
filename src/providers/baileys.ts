@@ -191,7 +191,7 @@ export class BaileysProvider implements IWhatsAppProvider {
       const isGroup = jid.endsWith("@g.us");
       const phone = jid.replace("@s.whatsapp.net", "").replace("@g.us", "");
       const contact = await upsertContact(this.db, phone);
-      const conversation = await upsertConversation(this.db, contact.id);
+      const conversation = await upsertConversation(this.db, contact.id, isGroup);
       await insertMessage(this.db, conversation.id, {
         direction: "outbound",
         content: text,
@@ -278,7 +278,7 @@ export class BaileysProvider implements IWhatsAppProvider {
         const isGroup = jid.endsWith("@g.us");
         const phone = jid.replace("@s.whatsapp.net", "").replace("@g.us", "");
         const contact = await upsertContact(this.db, phone);
-        const conversation = await upsertConversation(this.db, contact.id);
+        const conversation = await upsertConversation(this.db, contact.id, isGroup);
         const mediaType = mime.startsWith("image/") ? "image" : mime.startsWith("video/") ? "video" : mime.startsWith("audio/") ? "audio" : "document";
         await insertMessage(this.db, conversation.id, {
           direction: "outbound",
@@ -360,7 +360,7 @@ export class BaileysProvider implements IWhatsAppProvider {
     const waMessageId = msg.key?.id || null;
 
     const contact = await upsertContact(this.db, phone, contactName, contactName);
-    const conversation = await upsertConversation(this.db, contact.id);
+    const conversation = await upsertConversation(this.db, contact.id, isGroup);
 
     const inserted = await insertMessage(this.db, conversation.id, {
       direction,

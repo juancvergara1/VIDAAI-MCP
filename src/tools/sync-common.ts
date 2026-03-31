@@ -49,8 +49,9 @@ export async function upsertContact(
 
 /**
  * Get or create a conversation for a contact.
+ * If isGroup is true, marks the conversation as a group.
  */
-export async function upsertConversation(db: UserDb, contactId: string) {
+export async function upsertConversation(db: UserDb, contactId: string, isGroup?: boolean) {
   let conversation = await db.query.conversations.findFirst({
     where: eq(conversations.contactId, contactId),
   });
@@ -58,8 +59,13 @@ export async function upsertConversation(db: UserDb, contactId: string) {
   if (!conversation) {
     const [newConv] = await db.insert(conversations).values({
       contactId,
+      ...(isGroup ? { isGroup: "true" } : {}),
     }).returning();
     conversation = newConv;
+  } else if (isGroup && conversation.isGroup !== "true") {
+    // Upgrade existing conversation to group if we now know it's a group
+    await db.update(conversations).set({ isGroup: "true" }).where(eq(conversations.id, conversation.id));
+    conversation = { ...conversation, isGroup: "true" };
   }
 
   return conversation;

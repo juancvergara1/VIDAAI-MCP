@@ -244,6 +244,11 @@ export async function startServer() {
       }
     }
 
+    // If phone is a raw group ID (18+ digits, not a real phone number), append @g.us
+    if (phone.length >= 18 && !phone.includes("@")) {
+      phone = `${phone}@g.us`;
+    }
+
     const result = await provider.sendMessage(phone, text);
 
     if (result.success) {
@@ -283,6 +288,11 @@ export async function startServer() {
       } else {
         return { content: [{ type: "text" as const, text: `Contact "${to}" not found. Use a phone number instead.` }] };
       }
+    }
+
+    // If phone is a raw group ID (18+ digits, not a real phone number), append @g.us
+    if (phone.length >= 18 && !phone.includes("@")) {
+      phone = `${phone}@g.us`;
     }
 
     // Auto-detect MIME type from extension if not provided
