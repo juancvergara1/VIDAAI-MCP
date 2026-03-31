@@ -31,12 +31,10 @@ export async function startServer() {
     process.exit(1);
   }
 
-  // Cloud API requires API key + private key
-  if (PROVIDER === "cloud") {
-    if (!process.env.VIDA_API_KEY) {
-      console.error("Missing VIDA_API_KEY. Get one at vidaai.co/mcp");
-      process.exit(1);
-    }
+  // API key required for ALL providers (validates registration + billing)
+  if (!process.env.VIDA_API_KEY) {
+    console.error("Missing VIDA_API_KEY. Get one at vidaai.co/mcp");
+    process.exit(1);
   }
 
   // Baileys requires auth directory

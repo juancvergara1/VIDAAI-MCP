@@ -219,11 +219,35 @@ async function setupCloudApi() {
 // ── Baileys Setup ──
 
 async function setupBaileys() {
+  // API Key (required for all providers — validates registration + billing)
+  let apiKey = process.env.VIDA_API_KEY || "";
+  if (!apiKey) {
+    apiKey = await ask("  API key (from vidaai.co/mcp): ");
+  }
+  if (!apiKey.startsWith("sk_")) {
+    log("  Error: Invalid API key format. Should start with 'sk_'");
+    process.exit(1);
+  }
+
+  // Validate API key against relay
+  const { RelayClient } = await import("../relay-client.js");
+  const relay = new RelayClient(apiKey);
+  log("  Validating API key...");
+  try {
+    // Just validate the key is valid — don't need WhatsApp connected for Baileys
+    await relay.getWhatsAppStatus();
+    log("  API key valid");
+  } catch (err: any) {
+    log(`  Error: ${err.message}`);
+    log("  Check your API key and try again.");
+    process.exit(1);
+  }
+
   // Neon DB
   let neonUrl = await askForNeonUrl();
   await setupDatabase(neonUrl);
 
-  // QR code scan
+  // Pairing code connection
   const { runBaileysSetup } = await import("../providers/baileys-setup.js");
   const baileysAuthDir = resolve(homedir(), ".vida", "baileys-auth");
 
@@ -237,6 +261,7 @@ async function setupBaileys() {
     args: ["-y", "@vidaai/whatsapp-mcp"],
     env: {
       VIDA_PROVIDER: "baileys",
+      VIDA_API_KEY: apiKey,
       NEON_DATABASE_URL: neonUrl,
       VIDA_BAILEYS_AUTH: result.authDir,
     },
