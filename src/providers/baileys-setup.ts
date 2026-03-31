@@ -1,15 +1,19 @@
 /**
- * Baileys first-time setup — connects to WhatsApp via QR code scan.
+ * Baileys first-time setup — connects to WhatsApp via pairing code.
  * Separated from the runtime provider so setup.ts can use it independently.
- *
- * All output goes to stderr (stdout reserved for MCP JSON-RPC).
  */
 
 import { resolve } from "path";
 import { homedir } from "os";
+import { createInterface } from "readline";
 
 function log(msg: string) {
   process.stderr.write(msg + "\n");
+}
+
+function ask(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  return new Promise((r) => rl.question(question, (a) => { rl.close(); r(a.trim()); }));
 }
 
 export interface BaileysSetupResult {
@@ -18,99 +22,125 @@ export interface BaileysSetupResult {
 }
 
 export async function runBaileysSetup(authDir: string): Promise<BaileysSetupResult> {
-  // Resolve ~ to home directory
   const resolvedDir = authDir.startsWith("~")
     ? resolve(homedir(), authDir.slice(2))
     : resolve(authDir);
 
-  // Dynamic imports
+  // Import everything upfront
   const baileys = await import("@whiskeysockets/baileys");
   const makeWASocket = baileys.default;
-  const { useMultiFileAuthState, DisconnectReason } = baileys;
+  const { useMultiFileAuthState, fetchLatestWaWebVersion, DisconnectReason } = baileys;
   const pino = (await import("pino")).default;
-  const qrcodeModule = await import("qrcode-terminal");
-  const qrcode = qrcodeModule.default || qrcodeModule;
+  const { mkdirSync, rmSync, existsSync } = await import("fs");
 
-  const { mkdirSync } = await import("fs");
+  // Clear old auth state to force fresh pairing
+  if (existsSync(resolvedDir)) {
+    try { rmSync(resolvedDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
   mkdirSync(resolvedDir, { recursive: true });
 
-  const { state, saveCreds } = await useMultiFileAuthState(resolvedDir);
-  const logger = pino({ level: "silent" });
+  // Get phone number for pairing code
+  const phone = await ask("  Phone number (with country code, no +, e.g. 573001234567): ");
+  if (!phone || phone.length < 10) {
+    throw new Error("Invalid phone number.");
+  }
 
-  log("  Connecting to WhatsApp...");
-  log("  Scan the QR code with your phone:");
-  log("  WhatsApp → Settings → Linked Devices → Link a Device");
+  // Fetch latest WA protocol version
+  let version: [number, number, number] | undefined;
+  try {
+    const v = await fetchLatestWaWebVersion({});
+    version = v.version;
+  } catch { /* use Baileys default */ }
+
   log("");
-
-  const sock = makeWASocket({
-    auth: state,
-    logger,
-    printQRInTerminal: false,
-    browser: ["VIDA AI MCP", "Chrome", "1.0.0"],
-  });
-
-  sock.ev.on("creds.update", saveCreds);
+  log("  Connecting to WhatsApp...");
 
   return new Promise<BaileysSetupResult>((resolveSetup, reject) => {
     let settled = false;
-    let phoneNumber = "";
 
-    // Show QR code in terminal (to stderr)
-    sock.ev.on("connection.update", async (update: any) => {
-      const { connection, lastDisconnect, qr } = update;
+    async function connect() {
+      const { state, saveCreds } = await useMultiFileAuthState(resolvedDir);
 
-      if (qr) {
-        // Generate QR and output to stderr
-        qrcode.generate(qr, { small: true }, (qrStr: string) => {
-          // qrcode-terminal writes to stdout by default, we capture and redirect
-          process.stderr.write(qrStr + "\n");
-        });
-      }
+      // NO browser option when using pairing code (critical for successful pairing)
+      const sock = makeWASocket({
+        auth: state,
+        logger: pino({ level: "silent" }),
+        ...(version ? { version } : {}),
+      });
 
-      if (connection === "open" && !settled) {
-        settled = true;
+      sock.ev.on("creds.update", saveCreds);
 
-        // Get connected phone number
-        try {
-          const me = sock.user;
-          phoneNumber = me?.id?.replace(/:.*@/, "@").replace("@s.whatsapp.net", "") || "";
-          if (phoneNumber) {
-            log(`  Connected as +${phoneNumber}`);
-          } else {
+      let pairingRequested = false;
+
+      sock.ev.on("connection.update", async (update: any) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        // Request pairing code when QR is generated (instead of showing QR)
+        if (qr && !pairingRequested) {
+          pairingRequested = true;
+          try {
+            await new Promise(r => setTimeout(r, 1000));
+            const code = await sock.requestPairingCode(phone);
+            log("");
+            log("  =============================");
+            log(`  PAIRING CODE: ${code}`);
+            log("  =============================");
+            log("");
+            log("  On your phone:");
+            log("  WhatsApp → Linked Devices → Link a Device");
+            log("  → Link with phone number instead");
+            log(`  Enter the code: ${code}`);
+            log("");
+          } catch (e: any) {
+            log(`  Pairing code error: ${e.message}`);
+          }
+        }
+
+        if (connection === "open" && !settled) {
+          settled = true;
+          let phoneNumber = "";
+          try {
+            const me = sock.user;
+            phoneNumber = me?.id?.replace(/:.*@/, "@").replace("@s.whatsapp.net", "") || "";
+            if (phoneNumber) {
+              log(`  Connected as +${phoneNumber}`);
+            } else {
+              log("  Connected to WhatsApp.");
+            }
+          } catch {
             log("  Connected to WhatsApp.");
           }
-        } catch {
-          log("  Connected to WhatsApp.");
+
+          // Give WA a moment to finalize, then close
+          setTimeout(() => {
+            try { sock.end(undefined); } catch { /* ignore */ }
+            resolveSetup({ phoneNumber: phoneNumber || phone, authDir: resolvedDir });
+          }, 3000);
         }
 
-        // Close connection after successful auth (setup only, not runtime)
-        try {
-          sock.end(undefined);
-        } catch { /* ignore */ }
+        if (connection === "close" && !settled) {
+          const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
 
-        resolveSetup({
-          phoneNumber,
-          authDir: resolvedDir,
-        });
-      }
-
-      if (connection === "close" && !settled) {
-        const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
-        if (statusCode === DisconnectReason.loggedOut) {
-          settled = true;
-          reject(new Error("Connection rejected. Try again."));
+          if (shouldReconnect) {
+            // 515 after pairing is normal — reconnect
+            log("  Reconnecting...");
+            setTimeout(() => connect(), 2000);
+          } else {
+            settled = true;
+            reject(new Error("Connection rejected. Try again."));
+          }
         }
-        // Otherwise Baileys will auto-retry
-      }
-    });
+      });
+    }
 
-    // Timeout after 120s (QR expires after ~60s, gives time for 2 attempts)
+    connect();
+
     setTimeout(() => {
       if (!settled) {
         settled = true;
-        try { sock.end(undefined); } catch { /* ignore */ }
-        reject(new Error("QR scan timeout. Run setup again."));
+        reject(new Error("Pairing timeout. Run setup again."));
       }
-    }, 120000);
+    }, 180000);
   });
 }

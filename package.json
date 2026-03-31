@@ -11,11 +11,13 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "check": "tsc --noEmit",
-    "setup": "node build/bin/setup.js"
+    "setup": "node build/bin/setup.js",
+    "postinstall": "node scripts/patch-baileys.cjs"
   },
   "files": [
     "build",
-    "drizzle"
+    "drizzle",
+    "scripts"
   ],
   "keywords": [
     "mcp",
