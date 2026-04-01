@@ -117,55 +117,100 @@ async function setupDatabase(neonUrl: string) {
   log("  Tables created OK");
 }
 
-// ── Shared: Write config to Claude Code ──
+// ── Shared: Write config to Claude Code + Claude Desktop ──
 
-function writeConfigToClaude(whatsappServer: any): boolean {
-  const mcpJsonPath = resolve(homedir(), ".claude", ".mcp.json");
-  const claudeJsonPath = resolve(homedir(), ".claude.json");
+type Target = "code" | "desktop" | "both";
 
-  let success = false;
+function getDesktopConfigPaths(): string[] {
+  return [
+    resolve(process.env.APPDATA || "", "Claude", "claude_desktop_config.json"),                    // Windows
+    resolve(homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json"),   // macOS
+    resolve(homedir(), ".config", "Claude", "claude_desktop_config.json"),                          // Linux
+  ];
+}
 
-  // Write to .mcp.json (primary config for Claude Code CLI)
-  try {
-    let mcpConfig: any = { mcpServers: {} };
-    if (existsSync(mcpJsonPath)) {
-      const existing = readFileSync(mcpJsonPath, "utf-8");
-      mcpConfig = JSON.parse(existing);
-      if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
-    } else {
-      mkdirSync(dirname(mcpJsonPath), { recursive: true });
+function writeConfig(whatsappServer: any, target: Target): { code: boolean; desktop: boolean } {
+  const result = { code: false, desktop: false };
+  const writeCode = target === "code" || target === "both";
+  const writeDesktop = target === "desktop" || target === "both";
+
+  // Write to Claude Code configs
+  if (writeCode) {
+    const mcpJsonPath = resolve(homedir(), ".claude", ".mcp.json");
+    const claudeJsonPath = resolve(homedir(), ".claude.json");
+
+    try {
+      let mcpConfig: any = { mcpServers: {} };
+      if (existsSync(mcpJsonPath)) {
+        const existing = readFileSync(mcpJsonPath, "utf-8");
+        mcpConfig = JSON.parse(existing);
+        if (!mcpConfig.mcpServers) mcpConfig.mcpServers = {};
+      } else {
+        mkdirSync(dirname(mcpJsonPath), { recursive: true });
+      }
+
+      mcpConfig.mcpServers.whatsapp = whatsappServer;
+      writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf-8");
+      log(`  ✓ Config written to ${mcpJsonPath}`);
+      result.code = true;
+    } catch (err: any) {
+      log(`  ✗ Could not write to .mcp.json: ${err.message}`);
     }
 
-    mcpConfig.mcpServers.whatsapp = whatsappServer;
-    writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2) + "\n", "utf-8");
-    log(`  Config written to ${mcpJsonPath}`);
-    success = true;
-  } catch (err: any) {
-    log(`  Could not write to .mcp.json: ${err.message}`);
+    // Also update .claude.json if it has an existing whatsapp MCP config
+    try {
+      if (existsSync(claudeJsonPath)) {
+        const raw = readFileSync(claudeJsonPath, "utf-8");
+        const claudeConfig = JSON.parse(raw);
+        if (claudeConfig.mcpServers?.whatsapp) {
+          claudeConfig.mcpServers.whatsapp = whatsappServer;
+          writeFileSync(claudeJsonPath, JSON.stringify(claudeConfig, null, 2) + "\n", "utf-8");
+          log(`  ✓ Updated existing config in ${claudeJsonPath}`);
+        }
+      }
+    } catch {
+      // Non-critical — .mcp.json is the primary config
+    }
   }
 
-  // Also update .claude.json if it has an existing whatsapp MCP config
-  // This prevents stale configs from overriding the correct one
-  try {
-    if (existsSync(claudeJsonPath)) {
-      const raw = readFileSync(claudeJsonPath, "utf-8");
-      const claudeConfig = JSON.parse(raw);
-      if (claudeConfig.mcpServers?.whatsapp) {
-        claudeConfig.mcpServers.whatsapp = whatsappServer;
-        writeFileSync(claudeJsonPath, JSON.stringify(claudeConfig, null, 2) + "\n", "utf-8");
-        log(`  Updated existing config in ${claudeJsonPath}`);
+  // Write to Claude Desktop / Cowork config
+  if (writeDesktop) {
+    const desktopPaths = getDesktopConfigPaths();
+    let found = false;
+
+    for (const desktopPath of desktopPaths) {
+      try {
+        if (existsSync(desktopPath)) {
+          found = true;
+          const raw = readFileSync(desktopPath, "utf-8");
+          const desktopConfig = JSON.parse(raw);
+          if (!desktopConfig.mcpServers) desktopConfig.mcpServers = {};
+          desktopConfig.mcpServers.whatsapp = whatsappServer;
+          writeFileSync(desktopPath, JSON.stringify(desktopConfig, null, 2) + "\n", "utf-8");
+          log(`  ✓ Config written to ${desktopPath}`);
+          result.desktop = true;
+          break;
+        }
+      } catch (err: any) {
+        log(`  ✗ Could not write to Desktop config: ${err.message}`);
       }
     }
-  } catch {
-    // Non-critical — .mcp.json is the primary config
+
+    if (!found) {
+      log("  ✗ Claude Desktop config not found. Install Claude Desktop first, then re-run setup.");
+      log("    Expected paths:");
+      for (const p of desktopPaths) {
+        log(`      ${p}`);
+      }
+    }
   }
 
-  return success;
+  return result;
 }
 
 // ── Cloud API Setup ──
 
-async function setupCloudApi() {
+async function setupCloudApi(target: Target) {
   // API Key
   let apiKey = process.env.VIDA_API_KEY || "";
   if (!apiKey) {
@@ -233,13 +278,13 @@ async function setupCloudApi() {
     },
   };
 
-  const written = writeConfigToClaude(whatsappServer);
-  printSuccess(written, whatsappServer);
+  const writeResult = writeConfig(whatsappServer, target);
+  printSuccess(writeResult, target, whatsappServer);
 }
 
 // ── Baileys Setup ──
 
-async function setupBaileys() {
+async function setupBaileys(target: Target) {
   // API Key (required for all providers — validates registration + billing)
   let apiKey = process.env.VIDA_API_KEY || "";
   if (!apiKey) {
@@ -273,7 +318,7 @@ async function setupBaileys() {
   const baileysAuthDir = resolve(homedir(), ".vida", "baileys-auth");
 
   log("");
-  const result = await runBaileysSetup(baileysAuthDir);
+  const baileysResult = await runBaileysSetup(baileysAuthDir);
   log("");
 
   // Write config
@@ -284,12 +329,12 @@ async function setupBaileys() {
       VIDA_PROVIDER: "baileys",
       VIDA_API_KEY: apiKey,
       NEON_DATABASE_URL: neonUrl,
-      VIDA_BAILEYS_AUTH: result.authDir,
+      VIDA_BAILEYS_AUTH: baileysResult.authDir,
     },
   };
 
-  const written = writeConfigToClaude(whatsappServer);
-  printSuccess(written, whatsappServer);
+  const writeResult = writeConfig(whatsappServer, target);
+  printSuccess(writeResult, target, whatsappServer);
 }
 
 // ── Helpers ──
@@ -310,40 +355,42 @@ async function askForNeonUrl(): Promise<string> {
   return neonUrl;
 }
 
-function printSuccess(configWritten: boolean, whatsappServer: any) {
+function printSuccess(result: { code: boolean; desktop: boolean }, target: Target, whatsappServer: any) {
   log("");
   log("  Setup complete!");
   log("");
 
-  if (!configWritten) {
-    log("  Add this to your ~/.claude/.mcp.json (Claude Code)");
-    log("  or claude_desktop_config.json (Claude Desktop):");
+  // Show manual config JSON only for targets that failed
+  const codeFailed = (target === "code" || target === "both") && !result.code;
+  const desktopFailed = (target === "desktop" || target === "both") && !result.desktop;
+
+  if (codeFailed) {
+    log("  Could not write Claude Code config automatically.");
+    log("  Add this to ~/.claude/.mcp.json:");
     log("");
     log(JSON.stringify({ mcpServers: { whatsapp: whatsappServer } }, null, 2));
     log("");
   }
 
-  // Check for Claude Desktop config that might need manual update
-  const desktopConfigPaths = [
-    resolve(process.env.APPDATA || "", "Claude", "claude_desktop_config.json"),          // Windows
-    resolve(homedir(), "Library", "Application Support", "Claude", "claude_desktop_config.json"), // macOS
-  ];
-
-  for (const p of desktopConfigPaths) {
-    try {
-      if (existsSync(p)) {
-        const raw = readFileSync(p, "utf-8");
-        const cfg = JSON.parse(raw);
-        if (cfg.mcpServers?.whatsapp) {
-          log(`  Note: Found WhatsApp config in Claude Desktop (${p}).`);
-          log("  If you use Claude Desktop, update that config too or remove it to avoid conflicts.");
-          log("");
-        }
-      }
-    } catch { /* ignore */ }
+  if (desktopFailed) {
+    log("  Could not write Claude Desktop config automatically.");
+    log("  Add this to your claude_desktop_config.json:");
+    log("");
+    log(JSON.stringify({ mcpServers: { whatsapp: whatsappServer } }, null, 2));
+    log("");
   }
 
-  log("  Restart Claude Code, then try: 'show me my WhatsApp messages'");
+  // Restart instructions based on target
+  if (result.desktop) {
+    log("  Important: Fully quit Claude Desktop (kill all processes including coworsvc) and reopen it.");
+  }
+
+  const restartMsg =
+    target === "code" ? "Restart Claude Code" :
+    target === "desktop" ? "Restart Claude Desktop" :
+    "Restart Claude Code and Claude Desktop";
+
+  log(`  ${restartMsg}, then try: 'show me my WhatsApp messages'`);
   log("");
 }
 
@@ -363,10 +410,21 @@ async function main() {
 
   const choice = await ask("  Choose (1 or 2): ");
 
+  log("");
+  log("  Where do you want to use WhatsApp MCP?");
+  log("");
+  log("  [1] Claude Code (CLI)");
+  log("  [2] Claude Desktop / Cowork");
+  log("  [3] Both");
+  log("");
+
+  const targetChoice = await ask("  Choose (1, 2, or 3): ");
+  const target: Target = targetChoice === "2" ? "desktop" : targetChoice === "3" ? "both" : "code";
+
   if (choice === "2") {
-    await setupBaileys();
+    await setupBaileys(target);
   } else {
-    await setupCloudApi();
+    await setupCloudApi(target);
   }
 }
 
